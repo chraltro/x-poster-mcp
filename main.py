@@ -44,7 +44,23 @@ class XPosterMCP:
         method = request_data.get("method")
         request_id = request_data.get("id")
         
-        if method == "tools/list":
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": "x-poster-mcp",
+                        "version": "1.0.0"
+                    }
+                }
+            }
+        
+        elif method == "tools/list":
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -104,6 +120,11 @@ class XPosterMCP:
             }
 
 mcp_server = XPosterMCP()
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
 
 # Debug endpoint to check environment variables
 @app.get("/debug")
