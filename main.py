@@ -51,7 +51,7 @@ class XPosterMCP:
     async def handle_request(self, request_data: dict, auth_token: str = None) -> dict:
         method = request_data.get("method")
         request_id = request_data.get("id")
-        
+
         if method == "initialize":
             return {
                 "jsonrpc": "2.0",
@@ -59,30 +59,31 @@ class XPosterMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
-                        "tools": {}
+                        "tools": True
                     },
                     "serverInfo": {
                         "name": "x-poster-mcp",
                         "version": "1.0.0"
-                    }
+                    },
+                    "tools": self.tools
                 }
             }
-        
+
         elif method == "tools/list":
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {"tools": self.tools}
             }
-        
+
         elif method == "tools/call":
             params = request_data.get("params", {})
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
-            
+
             if tool_name == "send_tweet":
                 return await self.send_tweet(request_id, arguments)
-        
+
         return {
             "jsonrpc": "2.0",
             "id": request_id,
