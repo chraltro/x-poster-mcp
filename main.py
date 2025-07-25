@@ -152,6 +152,36 @@ async def test_endpoint(request: Request):
             "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
         }
 
+# Claude-compatible MCP endpoint
+@app.post("/mcp")
+async def claude_mcp_endpoint(request: Request):
+    try:
+        body = await request.json()
+        method = body.get("method")
+        
+        # Handle Claude's connection request
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "x-poster", "version": "1.0.0"}
+                }
+            }
+        
+        # Handle other requests
+        response = await mcp_server.handle_request(body)
+        return response
+        
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0", 
+            "id": body.get("id") if 'body' in locals() else None,
+            "error": {"code": -32700, "message": str(e)}
+        }
+
 @app.post("/sse")
 async def mcp_endpoint(request: Request):
     async def event_stream() -> AsyncGenerator[str, None]:
