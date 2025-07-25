@@ -1,18 +1,22 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
+from fastapi import FastAPI, Request, HTTPException, Form
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 import json
 import tweepy
 import os
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from dotenv import load_dotenv
 import uuid
+import secrets
+from datetime import datetime, timedelta
 
 load_dotenv()
 
 app = FastAPI()
 
-# Store "authenticated" sessions (in real app, use proper storage)
-authenticated_sessions = set()
+# OAuth state storage (in production, use proper database)
+oauth_clients = {}
+oauth_codes = {}
+access_tokens = {}
 
 # Twitter client setup
 def get_twitter_client():
@@ -43,7 +47,7 @@ class XPosterMCP:
             }
         ]
 
-    async def handle_request(self, request_data: dict) -> dict:
+    async def handle_request(self, request_data: dict, auth_token: str = None) -> dict:
         method = request_data.get("method")
         request_id = request_data.get("id")
         
@@ -71,6 +75,14 @@ class XPosterMCP:
             }
         
         elif method == "tools/call":
+            # Check authentication for tool calls
+            if not auth_token or auth_token not in access_tokens:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32600, "message": "Authentication required"}
+                }
+            
             params = request_data.get("params", {})
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
@@ -124,93 +136,135 @@ class XPosterMCP:
 
 mcp_server = XPosterMCP()
 
-# OAuth-style endpoints
-@app.get("/")
-async def root():
-    return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
-
-@app.get("/.well-known/mcp")
-async def mcp_info():
+# OAuth Discovery Endpoint
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_discovery():
+    base_url = "https://web-production-f408.up.railway.app"
     return {
-        "name": "X Poster MCP",
-        "version": "1.0.0",
-        "endpoints": {
-            "sse": "/sse"
-        },
-        "auth": {
-            "type": "oauth2",
-            "authorization_url": "/auth",
-            "token_url": "/token"
-        }
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/oauth/authorize",
+        "token_endpoint": f"{base_url}/oauth/token",
+        "registration_endpoint": f"{base_url}/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"]
     }
 
-@app.get("/auth")
-async def auth_page(redirect_uri: str = None, client_id: str = None, state: str = None):
-    # Create a session token
-    session_token = str(uuid.uuid4())
-    authenticated_sessions.add(session_token)
+# Dynamic Client Registration
+@app.post("/oauth/register")
+async def register_client(request: Request):
+    body = await request.json()
     
-    # Build redirect URL back to Claude
-    callback_url = f"/callback?code={session_token}"
-    if redirect_uri:
-        callback_url += f"&redirect_uri={redirect_uri}"
+    client_id = str(uuid.uuid4())
+    client_secret = secrets.token_urlsafe(32)
+    
+    oauth_clients[client_id] = {
+        "client_secret": client_secret,
+        "redirect_uris": body.get("redirect_uris", []),
+        "client_name": body.get("client_name", "MCP Client"),
+        "created_at": datetime.utcnow()
+    }
+    
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "client_id_issued_at": int(datetime.utcnow().timestamp()),
+        "client_secret_expires_at": 0  # Never expires
+    }
+
+# Authorization Endpoint
+@app.get("/oauth/authorize")
+async def authorize(
+    client_id: str,
+    redirect_uri: str,
+    response_type: str = "code",
+    scope: str = "mcp",
+    state: str = None
+):
+    if client_id not in oauth_clients:
+        raise HTTPException(status_code=400, detail="Invalid client_id")
+    
+    if redirect_uri not in oauth_clients[client_id]["redirect_uris"]:
+        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+    
+    # Generate authorization code
+    auth_code = secrets.token_urlsafe(32)
+    oauth_codes[auth_code] = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "expires_at": datetime.utcnow() + timedelta(minutes=10)
+    }
+    
+    # In a real app, show user consent page
+    # For now, auto-approve and redirect
+    callback_url = f"{redirect_uri}?code={auth_code}"
     if state:
         callback_url += f"&state={state}"
     
-    # Return a simple auth page that auto-redirects
-    html = f"""
-    <html>
-    <body>
-        <h1>X Poster Authentication</h1>
-        <p>Authorizing access...</p>
-        <script>
-            // Auto-redirect after 2 seconds
-            setTimeout(function() {{
-                window.location.href = "{callback_url}";
-            }}, 2000);
-        </script>
-        <p>If not redirected, <a href="{callback_url}">click here</a></p>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
+    return RedirectResponse(callback_url)
 
-@app.get("/callback")
-async def auth_callback(code: str = None, redirect_uri: str = None, state: str = None):
-    if code and code in authenticated_sessions:
-        # Build redirect back to Claude with auth code
-        if redirect_uri:
-            redirect_url = f"{redirect_uri}?code={code}"
-            if state:
-                redirect_url += f"&state={state}"
-            return RedirectResponse(redirect_url)
-        else:
-            return {"success": True, "code": code}
-    else:
-        return {"error": "Invalid authorization code"}
-
-@app.post("/token")
-async def token_endpoint(request: Request):
-    # Claude will exchange the code for a token here
-    body = await request.form()
-    code = body.get("code")
+# Token Endpoint
+@app.post("/oauth/token")
+async def token_endpoint(
+    grant_type: str = Form(),
+    code: str = Form(),
+    redirect_uri: str = Form(),
+    client_id: str = Form(),
+    client_secret: str = Form()
+):
+    if grant_type != "authorization_code":
+        raise HTTPException(status_code=400, detail="Unsupported grant type")
     
-    if code and code in authenticated_sessions:
-        return {
-            "access_token": f"token_{code}",
-            "token_type": "Bearer",
-            "expires_in": 3600
-        }
-    else:
+    if code not in oauth_codes:
         raise HTTPException(status_code=400, detail="Invalid authorization code")
+    
+    code_data = oauth_codes[code]
+    
+    if code_data["expires_at"] < datetime.utcnow():
+        del oauth_codes[code]
+        raise HTTPException(status_code=400, detail="Authorization code expired")
+    
+    if code_data["client_id"] != client_id:
+        raise HTTPException(status_code=400, detail="Invalid client")
+    
+    if client_id not in oauth_clients or oauth_clients[client_id]["client_secret"] != client_secret:
+        raise HTTPException(status_code=401, detail="Invalid client credentials")
+    
+    # Generate access token
+    access_token = secrets.token_urlsafe(32)
+    access_tokens[access_token] = {
+        "client_id": client_id,
+        "scope": code_data["scope"],
+        "expires_at": datetime.utcnow() + timedelta(hours=24)
+    }
+    
+    # Clean up used code
+    del oauth_codes[code]
+    
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 86400,  # 24 hours
+        "scope": code_data["scope"]
+    }
 
-# Main MCP endpoint
+# Helper function to extract auth token
+async def get_auth_token(request: Request) -> Optional[str]:
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    return None
+
+# Main MCP SSE Endpoint
 @app.post("/sse")
 async def mcp_endpoint(request: Request):
+    auth_token = await get_auth_token(request)
+    
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             body = await request.json()
-            response = await mcp_server.handle_request(body)
+            response = await mcp_server.handle_request(body, auth_token)
             yield f"data: {json.dumps(response)}\n\n"
             
         except Exception as e:
@@ -229,13 +283,24 @@ async def mcp_endpoint(request: Request):
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
+            "Access-Control-Allow-Headers": "Content-Type, Authorization"
         }
     )
 
 @app.options("/sse")
 async def options():
-    return {"message": "OK"}
+    return JSONResponse(
+        {"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization"
+        }
+    )
+
+@app.get("/")
+async def root():
+    return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
 
 if __name__ == "__main__":
     import uvicorn
