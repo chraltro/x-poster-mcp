@@ -19,26 +19,25 @@ load_dotenv()
 app = FastAPI(
     title="X Poster MCP Connector",
     description="A Claude custom connector for posting tweets to X/Twitter.",
-    version="1.3.0", # Version bump for new logic
+    version="2.0.0", # Final Version
 )
-
 
 # --- OAuth 2.0 In-Memory Storage & Static Client ---
 oauth_clients = {}
 oauth_codes = {}
 access_tokens = {}
 
-# Using a predictable, static client that survives server restarts.
-DEFAULT_CLIENT_ID = "claude-default-client-v1"
-DEFAULT_CLIENT_SECRET = os.getenv("CONNECTOR_CLIENT_SECRET", "a-very-strong-default-secret")
+# We define a permanent, static client. This is the ONLY client that will be used.
+DEFAULT_CLIENT_ID = "claude-xposter-static-client-v2" # Using a new, unique static ID
+DEFAULT_CLIENT_SECRET = os.getenv("CONNECTOR_CLIENT_SECRET", "a-very-strong-and-unique-secret-key")
 
 oauth_clients[DEFAULT_CLIENT_ID] = {
     "client_secret": DEFAULT_CLIENT_SECRET,
     "redirect_uris": ["https://claude.ai/oauth/callback", "http://localhost/oauth/callback"],
-    "client_name": "Claude Default X Poster Client",
+    "client_name": "Static X Poster Client",
     "created_at": datetime.utcnow()
 }
-logger.info(f"Default client initialized: {DEFAULT_CLIENT_ID}")
+logger.info(f"Permanent static client initialized: {DEFAULT_CLIENT_ID}")
 
 
 # --- Twitter Client Setup ---
@@ -58,7 +57,7 @@ class XPosterMCP:
         self.tools = [
             {
                 "name": "send_tweet",
-                "description": "Send a tweet to X/Twitter",
+                "description": "Send a tweet to X/Twitter.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"text": {"type": "string", "description": "The tweet text to post"}},
@@ -70,7 +69,7 @@ class XPosterMCP:
     async def handle_request(self, request_data: dict) -> dict:
         method = request_data.get("method")
         request_id = request_data.get("id")
-        logger.info(f"MCP Request Received: {method} (ID: {request_id})")
+        logger.info(f"MCP Request Received: {method}")
 
         if method == "initialize":
             return {
@@ -78,24 +77,22 @@ class XPosterMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": True},
-                    "serverInfo": {"name": "x-poster-mcp", "version": "1.3.0"},
+                    "serverInfo": {"name": "x-poster-mcp", "version": "2.0.0"},
                     "tools": self.tools
                 }
             }
-        elif method == "tools/list":
-            return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": self.tools}}
-        elif method == "tools/call" and request_data.get("params", {}).get("name") == "send_tweet":
-            return await self.send_tweet(request_id, request_data["params"].get("arguments", {}))
+        elif method == "tools/call":
+            return await self.send_tweet(request_id, request_data.get("params", {}).get("arguments", {}))
         
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}}
 
     async def send_tweet(self, request_id: str, args: dict) -> dict:
         try:
             tweet_text = args.get("text", "").strip()
-            if not tweet_text:
-                raise ValueError("Tweet text cannot be empty.")
+            if not tweet_text: raise ValueError("Tweet text cannot be empty.")
             
-            logger.info(f"Posting tweet: '{tweet_text[:50]}...'")
+            logger.info(f"Posting tweet...")
+            client = get_twitter_client()
             response = client.create_tweet(text=tweet_text)
             tweet_id = response.data['id']
             tweet_url = f"https://twitter.com/user/status/{tweet_id}"
@@ -114,12 +111,12 @@ async def oauth_discovery():
     return {
         "issuer": base_url, "authorization_endpoint": f"{base_url}/oauth/authorize",
         "token_endpoint": f"{base_url}/oauth/token", "registration_endpoint": f"{base_url}/oauth/register",
-        "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"]
     }
 
+# THIS IS THE MOST IMPORTANT FIX: Always register with the permanent static client.
 @app.post("/oauth/register", tags=["OAuth"])
 async def register_client(request: Request):
-    logger.info("Client registration request received. Returning static default credentials.")
+    logger.info("Registration request received. Returning PERMANENT static credentials.")
     return {
         "client_id": DEFAULT_CLIENT_ID, "client_secret": DEFAULT_CLIENT_SECRET,
         "client_id_issued_at": int(oauth_clients[DEFAULT_CLIENT_ID]["created_at"].timestamp()),
@@ -129,7 +126,7 @@ async def register_client(request: Request):
 @app.get("/oauth/authorize", tags=["OAuth"])
 async def authorize(client_id: str, redirect_uri: str, response_type: str = "code", state: Optional[str] = None):
     logger.info(f"Authorization request for client_id: {client_id}")
-    if client_id not in oauth_clients:
+    if client_id != DEFAULT_CLIENT_ID:
         raise HTTPException(status_code=400, detail="Invalid client_id")
     if redirect_uri not in oauth_clients[client_id]["redirect_uris"]:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
@@ -141,7 +138,7 @@ async def authorize(client_id: str, redirect_uri: str, response_type: str = "cod
 
 @app.post("/oauth/token", tags=["OAuth"])
 async def token_endpoint(grant_type: str = Form(), code: str = Form(), client_id: str = Form(), client_secret: str = Form()):
-    if client_id not in oauth_clients or oauth_clients[client_id]["client_secret"] != client_secret:
+    if client_id != DEFAULT_CLIENT_ID or client_secret != DEFAULT_CLIENT_SECRET:
         raise HTTPException(status_code=401, detail="Invalid client credentials")
     if code not in oauth_codes or oauth_codes[code]["client_id"] != client_id:
         raise HTTPException(status_code=400, detail="Invalid authorization code")
@@ -154,7 +151,7 @@ async def token_endpoint(grant_type: str = Form(), code: str = Form(), client_id
     access_tokens[access_token] = {"client_id": client_id, "expires_at": datetime.utcnow() + timedelta(hours=24)}
     return {"access_token": access_token, "token_type": "Bearer", "expires_in": 86400}
 
-# --- Main SSE Endpoint & Auth Helper ---
+# --- Main SSE Endpoint ---
 async def validate_auth_token(request: Request) -> bool:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "): return False
@@ -167,20 +164,15 @@ async def mcp_sse_post(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        # --- THIS IS THE FIX FOR "NO PROVIDED TOOLS" ---
-        # We now correctly handle the initial connection from Claude which has an empty body.
         try:
             body = await request.body()
+            # Handle initial connection with empty body
             if not body:
-                # On initial connection, proactively send the initialize response
                 logger.info("Empty body on SSE connection, sending `initialize` response.")
-                init_response = await mcp_server.handle_request({"jsonrpc": "2.0", "method": "initialize", "id": "init_1"})
-                yield f"data: {json.dumps(init_response)}\n\n"
-            else:
-                # For subsequent messages, handle the request normally
-                request_data = json.loads(body)
-                response = await mcp_server.handle_request(request_data)
-                yield f"data: {json.dumps(response)}\n\n"
+                response = await mcp_server.handle_request({"jsonrpc": "2.0", "method": "initialize", "id": "init_1"})
+            else: # Handle subsequent messages
+                response = await mcp_server.handle_request(json.loads(body))
+            yield f"data: {json.dumps(response)}\n\n"
         except Exception as e:
             logger.error(f"SSE stream error: {e}")
             yield f"data: {json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32603, 'message': str(e)}})}\n\n"
@@ -189,9 +181,7 @@ async def mcp_sse_post(request: Request):
 
 # --- Utility Endpoints ---
 @app.get("/", tags=["Health"])
-async def root(): return {"status": "running", "service": "X Poster MCP", "version": "1.3.0"}
-@app.get("/health", tags=["Health"])
-async def health(): return {"status": "healthy"}
+async def root(): return {"status": "running", "service": "X Poster MCP", "version": "2.0.0"}
 
 if __name__ == "__main__":
     import uvicorn
