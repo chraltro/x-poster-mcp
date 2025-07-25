@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import secrets
-import uuid
 from datetime import datetime, timedelta
 from typing import AsyncGenerator, Optional
 
@@ -13,31 +12,25 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 # --- Setup ---
-# Set up logging to see requests and errors in your server logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Load environment variables from .env file
 load_dotenv()
 
 app = FastAPI(
     title="X Poster MCP Connector",
     description="A Claude custom connector for posting tweets to X/Twitter.",
-    version="1.2.0",
+    version="1.3.0", # Version bump for new logic
 )
 
 
 # --- OAuth 2.0 In-Memory Storage & Static Client ---
-# The core of the fix is to use a predictable, static client that survives restarts.
-# When the app starts, this client is always available.
-
 oauth_clients = {}
 oauth_codes = {}
 access_tokens = {}
 
-# Pre-populate a default, static client. This is the source of truth.
-DEFAULT_CLIENT_ID = "claude-default-client-v1" # Using a simple, predictable ID
-DEFAULT_CLIENT_SECRET = os.getenv("CONNECTOR_CLIENT_SECRET", "a-very-strong-default-secret") # It's better to load this from env
+# Using a predictable, static client that survives server restarts.
+DEFAULT_CLIENT_ID = "claude-default-client-v1"
+DEFAULT_CLIENT_SECRET = os.getenv("CONNECTOR_CLIENT_SECRET", "a-very-strong-default-secret")
 
 oauth_clients[DEFAULT_CLIENT_ID] = {
     "client_secret": DEFAULT_CLIENT_SECRET,
@@ -50,7 +43,6 @@ logger.info(f"Default client initialized: {DEFAULT_CLIENT_ID}")
 
 # --- Twitter Client Setup ---
 def get_twitter_client():
-    """Initializes and returns a Tweepy client using credentials from environment variables."""
     return tweepy.Client(
         bearer_token=os.getenv("TWITTER_BEARER_TOKEN"),
         consumer_key=os.getenv("TWITTER_CONSUMER_KEY"),
@@ -69,12 +61,7 @@ class XPosterMCP:
                 "description": "Send a tweet to X/Twitter",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "text": {
-                            "type": "string",
-                            "description": "The tweet text to post (max 280 characters)"
-                        }
-                    },
+                    "properties": {"text": {"type": "string", "description": "The tweet text to post"}},
                     "required": ["text"]
                 }
             }
@@ -83,165 +70,96 @@ class XPosterMCP:
     async def handle_request(self, request_data: dict) -> dict:
         method = request_data.get("method")
         request_id = request_data.get("id")
-
         logger.info(f"MCP Request Received: {method} (ID: {request_id})")
 
-        # --- FIX #1: Correctly advertise tool capabilities ---
-        # The `initialize` method must respond with `"tools": True` and should include
-        # the tool list to ensure Claude sees that the tool is available for use.
         if method == "initialize":
             return {
-                "jsonrpc": "2.0",
-                "id": request_id,
+                "jsonrpc": "2.0", "id": request_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": True  # This tells Claude that tools are available
-                    },
-                    "serverInfo": {
-                        "name": "x-poster-mcp",
-                        "version": "1.2.0"
-                    },
-                    "tools": self.tools # This lists the tools for efficiency
+                    "capabilities": {"tools": True},
+                    "serverInfo": {"name": "x-poster-mcp", "version": "1.3.0"},
+                    "tools": self.tools
                 }
             }
-
         elif method == "tools/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"tools": self.tools}
-            }
-
-        elif method == "tools/call":
-            params = request_data.get("params", {})
-            if params.get("name") == "send_tweet":
-                return await self.send_tweet(request_id, params.get("arguments", {}))
-
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": "Method not found"}
-        }
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": self.tools}}
+        elif method == "tools/call" and request_data.get("params", {}).get("name") == "send_tweet":
+            return await self.send_tweet(request_id, request_data["params"].get("arguments", {}))
+        
+        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}}
 
     async def send_tweet(self, request_id: str, args: dict) -> dict:
         try:
-            client = get_twitter_client()
             tweet_text = args.get("text", "").strip()
-
             if not tweet_text:
-                return {
-                    "jsonrpc": "2.0", "id": request_id,
-                    "error": {"code": -32602, "message": "Tweet text is required."}
-                }
-
+                raise ValueError("Tweet text cannot be empty.")
+            
             logger.info(f"Posting tweet: '{tweet_text[:50]}...'")
             response = client.create_tweet(text=tweet_text)
             tweet_id = response.data['id']
             tweet_url = f"https://twitter.com/user/status/{tweet_id}"
-
-            return {
-                "jsonrpc": "2.0", "id": request_id,
-                "result": {"content": [{"type": "text", "text": f"✅ Tweet posted successfully!\nURL: {tweet_url}"}]}
-            }
-
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": f"✅ Tweet posted successfully!\nURL: {tweet_url}"}]}}
         except Exception as e:
             logger.error(f"Failed to post tweet: {e}")
-            return {
-                "jsonrpc": "2.0", "id": request_id,
-                "result": {"content": [{"type": "text", "text": f"❌ Failed to post tweet: {e}"}]}
-            }
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": f"❌ Failed to post tweet: {e}"}]}}
 
 mcp_server = XPosterMCP()
 
 
 # --- OAuth 2.0 Endpoints ---
-
 @app.get("/.well-known/oauth-authorization-server", tags=["OAuth"])
 async def oauth_discovery():
-    base_url = os.getenv("BASE_URL", "https://your-app-name.up.railway.app")
+    base_url = os.getenv("BASE_URL")
     return {
-        "issuer": base_url,
-        "authorization_endpoint": f"{base_url}/oauth/authorize",
-        "token_endpoint": f"{base_url}/oauth/token",
-        "registration_endpoint": f"{base_url}/oauth/register",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"]
+        "issuer": base_url, "authorization_endpoint": f"{base_url}/oauth/authorize",
+        "token_endpoint": f"{base_url}/oauth/token", "registration_endpoint": f"{base_url}/oauth/register",
+        "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"]
     }
 
-# --- FIX #2: Always register with the static client ---
-# This function is called by Claude once during installation. It MUST return
-# the same, permanent credentials every time to prevent auth errors after restarts.
 @app.post("/oauth/register", tags=["OAuth"])
 async def register_client(request: Request):
     logger.info("Client registration request received. Returning static default credentials.")
     return {
-        "client_id": DEFAULT_CLIENT_ID,
-        "client_secret": DEFAULT_CLIENT_SECRET,
+        "client_id": DEFAULT_CLIENT_ID, "client_secret": DEFAULT_CLIENT_SECRET,
         "client_id_issued_at": int(oauth_clients[DEFAULT_CLIENT_ID]["created_at"].timestamp()),
-        "client_secret_expires_at": 0  # Never expires
+        "client_secret_expires_at": 0
     }
 
 @app.get("/oauth/authorize", tags=["OAuth"])
 async def authorize(client_id: str, redirect_uri: str, response_type: str = "code", state: Optional[str] = None):
     logger.info(f"Authorization request for client_id: {client_id}")
-
     if client_id not in oauth_clients:
-        logger.error(f"Authorization failed: client_id '{client_id}' not found.")
         raise HTTPException(status_code=400, detail="Invalid client_id")
-
     if redirect_uri not in oauth_clients[client_id]["redirect_uris"]:
-        logger.error(f"Authorization failed: redirect_uri '{redirect_uri}' is not allowed for this client.")
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-
+    
     auth_code = secrets.token_urlsafe(32)
-    oauth_codes[auth_code] = {
-        "client_id": client_id,
-        "expires_at": datetime.utcnow() + timedelta(minutes=10)
-    }
-
-    callback_url = f"{redirect_uri}?code={auth_code}"
-    if state:
-        callback_url += f"&state={state}"
-
-    logger.info(f"Authorization successful. Redirecting to callback.")
+    oauth_codes[auth_code] = {"client_id": client_id, "expires_at": datetime.utcnow() + timedelta(minutes=10)}
+    callback_url = f"{redirect_uri}?code={auth_code}" + (f"&state={state}" if state else "")
     return RedirectResponse(callback_url)
 
 @app.post("/oauth/token", tags=["OAuth"])
-async def token_endpoint(grant_type: str = Form(), code: str = Form(), redirect_uri: str = Form(), client_id: str = Form(), client_secret: str = Form()):
-    logger.info(f"Token request for client_id: {client_id}")
-
+async def token_endpoint(grant_type: str = Form(), code: str = Form(), client_id: str = Form(), client_secret: str = Form()):
     if client_id not in oauth_clients or oauth_clients[client_id]["client_secret"] != client_secret:
-        logger.error("Token request failed: Invalid client credentials.")
         raise HTTPException(status_code=401, detail="Invalid client credentials")
-
     if code not in oauth_codes or oauth_codes[code]["client_id"] != client_id:
-        logger.error("Token request failed: Invalid or mismatched authorization code.")
         raise HTTPException(status_code=400, detail="Invalid authorization code")
-
+    
     code_data = oauth_codes.pop(code)
     if code_data["expires_at"] < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Authorization code expired")
-
+    
     access_token = f"tk_{secrets.token_urlsafe(32)}"
-    access_tokens[access_token] = {
-        "client_id": client_id,
-        "expires_at": datetime.utcnow() + timedelta(hours=24)
-    }
-
-    logger.info(f"Token issued successfully for client_id: {client_id}")
+    access_tokens[access_token] = {"client_id": client_id, "expires_at": datetime.utcnow() + timedelta(hours=24)}
     return {"access_token": access_token, "token_type": "Bearer", "expires_in": 86400}
-
 
 # --- Main SSE Endpoint & Auth Helper ---
 async def validate_auth_token(request: Request) -> bool:
     auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return False
+    if not auth_header or not auth_header.startswith("Bearer "): return False
     token = auth_header[7:]
-    if token in access_tokens and access_tokens[token]["expires_at"] > datetime.utcnow():
-        return True
-    return False
+    return token in access_tokens and access_tokens[token]["expires_at"] > datetime.utcnow()
 
 @app.post("/sse", tags=["MCP"])
 async def mcp_sse_post(request: Request):
@@ -249,33 +167,31 @@ async def mcp_sse_post(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def event_stream() -> AsyncGenerator[str, None]:
+        # --- THIS IS THE FIX FOR "NO PROVIDED TOOLS" ---
+        # We now correctly handle the initial connection from Claude which has an empty body.
         try:
-            request_data = await request.json()
-            response = await mcp_server.handle_request(request_data)
-            yield f"data: {json.dumps(response)}\n\n"
+            body = await request.body()
+            if not body:
+                # On initial connection, proactively send the initialize response
+                logger.info("Empty body on SSE connection, sending `initialize` response.")
+                init_response = await mcp_server.handle_request({"jsonrpc": "2.0", "method": "initialize", "id": "init_1"})
+                yield f"data: {json.dumps(init_response)}\n\n"
+            else:
+                # For subsequent messages, handle the request normally
+                request_data = json.loads(body)
+                response = await mcp_server.handle_request(request_data)
+                yield f"data: {json.dumps(response)}\n\n"
         except Exception as e:
             logger.error(f"SSE stream error: {e}")
             yield f"data: {json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32603, 'message': str(e)}})}\n\n"
-
+    
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-
-# --- Utility & Health Check Endpoints ---
+# --- Utility Endpoints ---
 @app.get("/", tags=["Health"])
-async def root():
-    return {"status": "running", "service": "X Poster MCP", "version": "1.2.0"}
-
+async def root(): return {"status": "running", "service": "X Poster MCP", "version": "1.3.0"}
 @app.get("/health", tags=["Health"])
-async def health():
-    return {"status": "healthy"}
-
-@app.get("/debug", tags=["Debug"])
-async def debug_state():
-    return {
-        "registered_clients": list(oauth_clients.keys()),
-        "active_auth_codes": len(oauth_codes),
-        "active_access_tokens": len(access_tokens)
-    }
+async def health(): return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
