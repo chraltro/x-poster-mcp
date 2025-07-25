@@ -105,6 +105,18 @@ class XPosterMCP:
 
 mcp_server = XPosterMCP()
 
+# Debug endpoint to check environment variables
+@app.get("/debug")
+async def debug_env():
+    return {
+        "bearer_token_exists": bool(os.getenv("TWITTER_BEARER_TOKEN")),
+        "consumer_key_exists": bool(os.getenv("TWITTER_CONSUMER_KEY")),
+        "consumer_secret_exists": bool(os.getenv("TWITTER_CONSUMER_SECRET")),
+        "access_token_exists": bool(os.getenv("TWITTER_ACCESS_TOKEN")),
+        "access_token_secret_exists": bool(os.getenv("TWITTER_ACCESS_TOKEN_SECRET")),
+        "bearer_token_preview": os.getenv("TWITTER_BEARER_TOKEN", "NOT_SET")[:10] + "..." if os.getenv("TWITTER_BEARER_TOKEN") else "NOT_SET"
+    }
+
 # Simple JSON endpoint for testing
 @app.post("/test")
 async def test_endpoint(request: Request):
