@@ -1,15 +1,18 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
 import json
 import tweepy
 import os
 from typing import AsyncGenerator
 from dotenv import load_dotenv
+import uuid
 
-# Load environment variables from .env file
 load_dotenv()
 
 app = FastAPI()
+
+# Store "authenticated" sessions (in real app, use proper storage)
+authenticated_sessions = set()
 
 # Twitter client setup
 def get_twitter_client():
@@ -121,77 +124,44 @@ class XPosterMCP:
 
 mcp_server = XPosterMCP()
 
-# Root endpoint
+# OAuth-style endpoints
 @app.get("/")
 async def root():
     return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
 
-# Debug endpoint to check environment variables
-@app.get("/debug")
-async def debug_env():
-    return {
-        "bearer_token_exists": bool(os.getenv("TWITTER_BEARER_TOKEN")),
-        "consumer_key_exists": bool(os.getenv("TWITTER_CONSUMER_KEY")),
-        "consumer_secret_exists": bool(os.getenv("TWITTER_CONSUMER_SECRET")),
-        "access_token_exists": bool(os.getenv("TWITTER_ACCESS_TOKEN")),
-        "access_token_secret_exists": bool(os.getenv("TWITTER_ACCESS_TOKEN_SECRET")),
-        "bearer_token_preview": os.getenv("TWITTER_BEARER_TOKEN", "NOT_SET")[:10] + "..." if os.getenv("TWITTER_BEARER_TOKEN") else "NOT_SET"
-    }
+@app.get("/auth")
+async def auth_page():
+    # Create a session token
+    session_token = str(uuid.uuid4())
+    authenticated_sessions.add(session_token)
+    
+    # Return a simple auth page
+    html = f"""
+    <html>
+    <body>
+        <h1>X Poster Authentication</h1>
+        <p>Click to authorize access:</p>
+        <a href="/callback?token={session_token}">Authorize</a>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
-# Simple JSON endpoint for testing
-@app.post("/test")
-async def test_endpoint(request: Request):
-    try:
-        body = await request.json()
-        response = await mcp_server.handle_request(body)
-        return response
-    except Exception as e:
-        return {
-            "jsonrpc": "2.0",
-            "id": None,
-            "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
-        }
+@app.get("/callback")
+async def auth_callback(token: str = None):
+    if token and token in authenticated_sessions:
+        # Redirect back to Claude with success
+        return RedirectResponse("https://claude.ai?auth=success")
+    else:
+        return {"error": "Invalid token"}
 
-# Claude-compatible MCP endpoint
-@app.post("/mcp")
-async def claude_mcp_endpoint(request: Request):
-    try:
-        body = await request.json()
-        method = body.get("method")
-        
-        # Handle Claude's connection request
-        if method == "initialize":
-            return {
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "x-poster", "version": "1.0.0"}
-                }
-            }
-        
-        # Handle other requests
-        response = await mcp_server.handle_request(body)
-        return response
-        
-    except Exception as e:
-        return {
-            "jsonrpc": "2.0", 
-            "id": body.get("id") if 'body' in locals() else None,
-            "error": {"code": -32700, "message": str(e)}
-        }
-
+# Main MCP endpoint
 @app.post("/sse")
 async def mcp_endpoint(request: Request):
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             body = await request.json()
-            
-            # Handle the request
             response = await mcp_server.handle_request(body)
-            
-            # Send as proper SSE format
             yield f"data: {json.dumps(response)}\n\n"
             
         except Exception as e:
@@ -204,7 +174,7 @@ async def mcp_endpoint(request: Request):
     
     return StreamingResponse(
         event_stream(),
-        media_type="text/event-stream",  # Changed from text/plain
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
