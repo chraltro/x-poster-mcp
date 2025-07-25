@@ -19,7 +19,7 @@ load_dotenv()
 app = FastAPI(
     title="X Poster MCP Connector",
     description="A Claude custom connector for posting tweets to X/Twitter.",
-    version="2.0.0", # Final Version
+    version="2.1.0", # Final, Corrected Version
 )
 
 # --- OAuth 2.0 In-Memory Storage & Static Client ---
@@ -28,16 +28,23 @@ oauth_codes = {}
 access_tokens = {}
 
 # We define a permanent, static client. This is the ONLY client that will be used.
-DEFAULT_CLIENT_ID = "claude-xposter-static-client-v2" # Using a new, unique static ID
+DEFAULT_CLIENT_ID = "claude-xposter-static-client-v2"
 DEFAULT_CLIENT_SECRET = os.getenv("CONNECTOR_CLIENT_SECRET", "a-very-strong-and-unique-secret-key")
 
+# --- THIS IS THE FIX ---
+# The redirect_uri has been corrected to match what is in your logs.
 oauth_clients[DEFAULT_CLIENT_ID] = {
     "client_secret": DEFAULT_CLIENT_SECRET,
-    "redirect_uris": ["https://claude.ai/oauth/callback", "http://localhost/oauth/callback"],
+    "redirect_uris": [
+        "https://claude.ai/api/mcp/auth_callback", # The correct URI from logs
+        "https://claude.ai/oauth/callback",      # Keeping the old one just in case
+        "http://localhost/oauth/callback"        # For local testing
+    ],
     "client_name": "Static X Poster Client",
     "created_at": datetime.utcnow()
 }
 logger.info(f"Permanent static client initialized: {DEFAULT_CLIENT_ID}")
+logger.info(f"Allowed Redirect URIs: {oauth_clients[DEFAULT_CLIENT_ID]['redirect_uris']}")
 
 
 # --- Twitter Client Setup ---
@@ -77,7 +84,7 @@ class XPosterMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": True},
-                    "serverInfo": {"name": "x-poster-mcp", "version": "2.0.0"},
+                    "serverInfo": {"name": "x-poster-mcp", "version": "2.1.0"},
                     "tools": self.tools
                 }
             }
@@ -113,7 +120,6 @@ async def oauth_discovery():
         "token_endpoint": f"{base_url}/oauth/token", "registration_endpoint": f"{base_url}/oauth/register",
     }
 
-# THIS IS THE MOST IMPORTANT FIX: Always register with the permanent static client.
 @app.post("/oauth/register", tags=["OAuth"])
 async def register_client(request: Request):
     logger.info("Registration request received. Returning PERMANENT static credentials.")
@@ -126,14 +132,21 @@ async def register_client(request: Request):
 @app.get("/oauth/authorize", tags=["OAuth"])
 async def authorize(client_id: str, redirect_uri: str, response_type: str = "code", state: Optional[str] = None):
     logger.info(f"Authorization request for client_id: {client_id}")
+    
+    # Check 1: Is the client ID the one we expect?
     if client_id != DEFAULT_CLIENT_ID:
+        logger.error(f"Authorization failed: Received client_id '{client_id}' does not match expected '{DEFAULT_CLIENT_ID}'.")
         raise HTTPException(status_code=400, detail="Invalid client_id")
+    
+    # Check 2: Is the redirect URI in our allowed list?
     if redirect_uri not in oauth_clients[client_id]["redirect_uris"]:
+        logger.error(f"Authorization failed: redirect_uri '{redirect_uri}' is not in the allowed list.")
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
     
     auth_code = secrets.token_urlsafe(32)
     oauth_codes[auth_code] = {"client_id": client_id, "expires_at": datetime.utcnow() + timedelta(minutes=10)}
     callback_url = f"{redirect_uri}?code={auth_code}" + (f"&state={state}" if state else "")
+    logger.info("Authorization checks passed. Redirecting to callback.")
     return RedirectResponse(callback_url)
 
 @app.post("/oauth/token", tags=["OAuth"])
@@ -166,11 +179,10 @@ async def mcp_sse_post(request: Request):
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             body = await request.body()
-            # Handle initial connection with empty body
             if not body:
                 logger.info("Empty body on SSE connection, sending `initialize` response.")
                 response = await mcp_server.handle_request({"jsonrpc": "2.0", "method": "initialize", "id": "init_1"})
-            else: # Handle subsequent messages
+            else:
                 response = await mcp_server.handle_request(json.loads(body))
             yield f"data: {json.dumps(response)}\n\n"
         except Exception as e:
@@ -181,7 +193,7 @@ async def mcp_sse_post(request: Request):
 
 # --- Utility Endpoints ---
 @app.get("/", tags=["Health"])
-async def root(): return {"status": "running", "service": "X Poster MCP", "version": "2.0.0"}
+async def root(): return {"status": "running", "service": "X Poster MCP", "version": "2.1.0"}
 
 if __name__ == "__main__":
     import uvicorn
