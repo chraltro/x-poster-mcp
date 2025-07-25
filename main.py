@@ -76,13 +76,15 @@ class XPosterMCP:
                 "id": request_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
+                    # CORRECT: Use `True` and include the tool list.
                     "capabilities": {
-                        "tools": {}
+                        "tools": True
                     },
                     "serverInfo": {
                         "name": "x-poster-mcp",
                         "version": "1.0.0"
-                    }
+                    },
+                    "tools": self.tools
                 }
             }
 
