@@ -129,31 +129,80 @@ mcp_server = XPosterMCP()
 async def root():
     return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
 
+@app.get("/.well-known/mcp")
+async def mcp_info():
+    return {
+        "name": "X Poster MCP",
+        "version": "1.0.0",
+        "endpoints": {
+            "sse": "/sse"
+        },
+        "auth": {
+            "type": "oauth2",
+            "authorization_url": "/auth",
+            "token_url": "/token"
+        }
+    }
+
 @app.get("/auth")
-async def auth_page():
+async def auth_page(redirect_uri: str = None, client_id: str = None, state: str = None):
     # Create a session token
     session_token = str(uuid.uuid4())
     authenticated_sessions.add(session_token)
     
-    # Return a simple auth page
+    # Build redirect URL back to Claude
+    callback_url = f"/callback?code={session_token}"
+    if redirect_uri:
+        callback_url += f"&redirect_uri={redirect_uri}"
+    if state:
+        callback_url += f"&state={state}"
+    
+    # Return a simple auth page that auto-redirects
     html = f"""
     <html>
     <body>
         <h1>X Poster Authentication</h1>
-        <p>Click to authorize access:</p>
-        <a href="/callback?token={session_token}">Authorize</a>
+        <p>Authorizing access...</p>
+        <script>
+            // Auto-redirect after 2 seconds
+            setTimeout(function() {{
+                window.location.href = "{callback_url}";
+            }}, 2000);
+        </script>
+        <p>If not redirected, <a href="{callback_url}">click here</a></p>
     </body>
     </html>
     """
     return HTMLResponse(html)
 
 @app.get("/callback")
-async def auth_callback(token: str = None):
-    if token and token in authenticated_sessions:
-        # Redirect back to Claude with success
-        return RedirectResponse("https://claude.ai?auth=success")
+async def auth_callback(code: str = None, redirect_uri: str = None, state: str = None):
+    if code and code in authenticated_sessions:
+        # Build redirect back to Claude with auth code
+        if redirect_uri:
+            redirect_url = f"{redirect_uri}?code={code}"
+            if state:
+                redirect_url += f"&state={state}"
+            return RedirectResponse(redirect_url)
+        else:
+            return {"success": True, "code": code}
     else:
-        return {"error": "Invalid token"}
+        return {"error": "Invalid authorization code"}
+
+@app.post("/token")
+async def token_endpoint(request: Request):
+    # Claude will exchange the code for a token here
+    body = await request.form()
+    code = body.get("code")
+    
+    if code and code in authenticated_sessions:
+        return {
+            "access_token": f"token_{code}",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Invalid authorization code")
 
 # Main MCP endpoint
 @app.post("/sse")
