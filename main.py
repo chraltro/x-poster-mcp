@@ -1,13 +1,10 @@
-from fastapi import FastAPI, Request, HTTPException, Form
-from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 import json
 import tweepy
 import os
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 from dotenv import load_dotenv
-import uuid
-import secrets
-from datetime import datetime, timedelta
 import asyncio
 import logging
 
@@ -18,11 +15,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 app = FastAPI()
-
-# OAuth state storage (in production, use proper database)
-oauth_clients = {}
-oauth_codes = {}
-access_tokens = {}
 
 # Twitter client setup
 def get_twitter_client():
@@ -53,7 +45,7 @@ class XPosterMCP:
             }
         ]
 
-    async def handle_request(self, request_data: dict, auth_token: str = None) -> dict:
+    async def handle_request(self, request_data: dict) -> dict:
         method = request_data.get("method")
         request_id = request_data.get("id")
 
@@ -101,11 +93,15 @@ class XPosterMCP:
             client = get_twitter_client()
             tweet_text = args["text"]
             
+            logger.info(f"Attempting to send tweet: {tweet_text}")
+            
             # Post the tweet
             response = client.create_tweet(text=tweet_text)
             
             tweet_id = response.data['id']
             tweet_url = f"https://twitter.com/user/status/{tweet_id}"
+            
+            logger.info(f"Tweet posted successfully: {tweet_url}")
             
             return {
                 "jsonrpc": "2.0",
@@ -121,6 +117,7 @@ class XPosterMCP:
             }
             
         except Exception as e:
+            logger.error(f"Failed to post tweet: {str(e)}")
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -136,170 +133,66 @@ class XPosterMCP:
 
 mcp_server = XPosterMCP()
 
-# Simplified OAuth Discovery Endpoint
-@app.get("/.well-known/oauth-authorization-server")
-async def oauth_discovery():
-    base_url = os.getenv("BASE_URL", "https://web-production-f408.up.railway.app")
-    logger.info(f"OAuth discovery requested, base_url: {base_url}")
-    return {
-        "issuer": base_url,
-        "authorization_endpoint": f"{base_url}/oauth/authorize",
-        "token_endpoint": f"{base_url}/oauth/token",
-        "registration_endpoint": f"{base_url}/oauth/register",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
-        "code_challenge_methods_supported": ["S256"]
-    }
+# Simple API key validation (using a fixed key for simplicity)
+API_KEY = os.getenv("MCP_API_KEY", "12345")
 
-# Dynamic Client Registration
-@app.post("/oauth/register")
-async def register_client(request: Request):
-    body = await request.json()
-    logger.info(f"Client registration request: {body}")
-    
-    client_id = str(uuid.uuid4())
-    client_secret = secrets.token_urlsafe(32)
-    
-    oauth_clients[client_id] = {
-        "client_secret": client_secret,
-        "redirect_uris": body.get("redirect_uris", []),
-        "client_name": body.get("client_name", "MCP Client"),
-        "created_at": datetime.utcnow()
-    }
-    
-    logger.info(f"Registered client: {client_id}")
-    logger.info(f"Current oauth_clients: {list(oauth_clients.keys())}")
-    
-    return {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "client_id_issued_at": int(datetime.utcnow().timestamp()),
-        "client_secret_expires_at": 0  # Never expires
-    }
-
-# Authorization Endpoint
-@app.get("/oauth/authorize")
-async def authorize(
-    client_id: str,
-    redirect_uri: str,
-    response_type: str = "code",
-    scope: str = "mcp",
-    state: str = None
-):
-    logger.info(f"Authorization request - client_id: {client_id}, redirect_uri: {redirect_uri}")
-    logger.info(f"Available clients: {list(oauth_clients.keys())}")
-    
-    if client_id not in oauth_clients:
-        logger.error(f"Invalid client_id: {client_id}")
-        raise HTTPException(status_code=400, detail="Invalid client_id")
-    
-    client_data = oauth_clients[client_id]
-    logger.info(f"Client data: {client_data}")
-    
-    if redirect_uri not in client_data["redirect_uris"]:
-        logger.error(f"Invalid redirect_uri: {redirect_uri}, allowed: {client_data['redirect_uris']}")
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-    
-    # Generate authorization code
-    auth_code = secrets.token_urlsafe(32)
-    oauth_codes[auth_code] = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "scope": scope,
-        "expires_at": datetime.utcnow() + timedelta(minutes=10)
-    }
-    
-    logger.info(f"Generated auth code: {auth_code}")
-    
-    # In a real app, show user consent page
-    # For now, auto-approve and redirect
-    callback_url = f"{redirect_uri}?code={auth_code}"
-    if state:
-        callback_url += f"&state={state}"
-    
-    logger.info(f"Redirecting to: {callback_url}")
-    return RedirectResponse(callback_url)
-
-# Token Endpoint
-@app.post("/oauth/token")
-async def token_endpoint(
-    grant_type: str = Form(),
-    code: str = Form(),
-    redirect_uri: str = Form(),
-    client_id: str = Form(),
-    client_secret: str = Form()
-):
-    logger.info(f"Token request - grant_type: {grant_type}, code: {code}, client_id: {client_id}")
-    
-    if grant_type != "authorization_code":
-        raise HTTPException(status_code=400, detail="Unsupported grant type")
-    
-    if code not in oauth_codes:
-        logger.error(f"Invalid authorization code: {code}")
-        raise HTTPException(status_code=400, detail="Invalid authorization code")
-    
-    code_data = oauth_codes[code]
-    
-    if code_data["expires_at"] < datetime.utcnow():
-        del oauth_codes[code]
-        logger.error("Authorization code expired")
-        raise HTTPException(status_code=400, detail="Authorization code expired")
-    
-    if code_data["client_id"] != client_id:
-        logger.error(f"Client mismatch - code client: {code_data['client_id']}, request client: {client_id}")
-        raise HTTPException(status_code=400, detail="Invalid client")
-    
-    if client_id not in oauth_clients or oauth_clients[client_id]["client_secret"] != client_secret:
-        logger.error(f"Invalid client credentials for client: {client_id}")
-        raise HTTPException(status_code=401, detail="Invalid client credentials")
-    
-    # Generate access token
-    access_token = secrets.token_urlsafe(32)
-    access_tokens[access_token] = {
-        "client_id": client_id,
-        "scope": code_data["scope"],
-        "expires_at": datetime.utcnow() + timedelta(hours=24)
-    }
-    
-    logger.info(f"Generated access token for client: {client_id}")
-    
-    # Clean up used code
-    del oauth_codes[code]
-    
-    return {
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": 86400,  # 24 hours
-        "scope": code_data["scope"]
-    }
-
-# Helper function to extract and validate auth token
-async def get_auth_token(request: Request) -> Optional[str]:
+def validate_api_key(request: Request) -> bool:
+    """Simple API key validation"""
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
+    if not auth_header:
+        return False
+    
+    if auth_header.startswith("Bearer "):
         token = auth_header[7:]
-        # Validate token
-        if token in access_tokens:
-            token_data = access_tokens[token]
-            if token_data["expires_at"] > datetime.utcnow():
-                return token
-            else:
-                # Token expired
-                del access_tokens[token]
-        logger.warning(f"Invalid or expired token used")
-    return None
+        return token == API_KEY
+    
+    return False
 
-# Main MCP SSE Endpoint - Fixed to handle streaming properly
-@app.post("/sse")
+# Main MCP Endpoint - No OAuth, just simple API key
+@app.post("/mcp")
 async def mcp_endpoint(request: Request):
-    auth_token = await get_auth_token(request)
-    logger.info(f"SSE POST request - auth_token present: {auth_token is not None}")
+    # Validate API key
+    if not validate_api_key(request):
+        logger.warning("Unauthorized request - invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    try:
+        body = await request.json()
+        logger.info(f"Received MCP request: {body}")
+        
+        response = await mcp_server.handle_request(body)
+        logger.info(f"Sending MCP response: {response}")
+        
+        return response
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32603, "message": f"Internal error: {str(e)}"}
+        }
+
+# SSE Endpoint for MCP protocol
+@app.post("/sse")
+async def mcp_sse_endpoint(request: Request):
+    # Validate API key
+    if not validate_api_key(request):
+        logger.warning("Unauthorized SSE request - invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
     
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             # Read the request body
             body = await request.body()
-            logger.info(f"Request body length: {len(body) if body else 0}")
+            logger.info(f"SSE Request body length: {len(body) if body else 0}")
             
             # Handle empty body (initial connection)
             if not body:
@@ -308,22 +201,22 @@ async def mcp_endpoint(request: Request):
                     "jsonrpc": "2.0",
                     "method": "initialize",
                     "id": 1
-                }, auth_token)
-                logger.info(f"Sending init response: {init_response}")
+                })
+                logger.info(f"Sending SSE init response: {init_response}")
                 yield f"data: {json.dumps(init_response)}\n\n"
                 return
             
             # Parse the request
             request_data = json.loads(body)
-            logger.info(f"Parsed request: {request_data}")
+            logger.info(f"Parsed SSE request: {request_data}")
             
             # Handle the request
-            response = await mcp_server.handle_request(request_data, auth_token)
-            logger.info(f"Sending response: {response}")
+            response = await mcp_server.handle_request(request_data)
+            logger.info(f"Sending SSE response: {response}")
             yield f"data: {json.dumps(response)}\n\n"
             
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
+            logger.error(f"SSE JSON decode error: {e}")
             error_response = {
                 "jsonrpc": "2.0",
                 "id": None,
@@ -331,7 +224,7 @@ async def mcp_endpoint(request: Request):
             }
             yield f"data: {json.dumps(error_response)}\n\n"
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"SSE Unexpected error: {e}")
             error_response = {
                 "jsonrpc": "2.0",
                 "id": None,
@@ -348,15 +241,17 @@ async def mcp_endpoint(request: Request):
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            "X-Accel-Buffering": "no"  # Disable Nginx buffering
+            "X-Accel-Buffering": "no"
         }
     )
 
-# Add GET endpoint for SSE (some clients might use GET)
+# GET endpoint for SSE
 @app.get("/sse")
-async def mcp_endpoint_get(request: Request):
-    auth_token = await get_auth_token(request)
-    logger.info(f"SSE GET request - auth_token present: {auth_token is not None}")
+async def mcp_sse_get(request: Request):
+    # Validate API key
+    if not validate_api_key(request):
+        logger.warning("Unauthorized SSE GET request - invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
     
     async def event_stream() -> AsyncGenerator[str, None]:
         # Send initialization message
@@ -364,8 +259,8 @@ async def mcp_endpoint_get(request: Request):
             "jsonrpc": "2.0",
             "method": "initialize",
             "id": 1
-        }, auth_token)
-        logger.info(f"Sending GET init response: {init_response}")
+        })
+        logger.info(f"Sending SSE GET init response: {init_response}")
         yield f"data: {json.dumps(init_response)}\n\n"
         
         # Keep connection alive
@@ -387,6 +282,7 @@ async def mcp_endpoint_get(request: Request):
     )
 
 @app.options("/sse")
+@app.options("/mcp")
 async def options():
     return JSONResponse(
         {"message": "OK"},
@@ -399,21 +295,34 @@ async def options():
 
 @app.get("/")
 async def root():
-    return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
+    return {
+        "name": "X Poster MCP", 
+        "version": "1.0.0", 
+        "status": "running",
+        "endpoints": {
+            "mcp": "/mcp",
+            "sse": "/sse"
+        },
+        "auth": "Bearer token required"
+    }
 
 # Health check endpoint
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
 
-# Debug endpoint to check stored clients
-@app.get("/debug/clients")
-async def debug_clients():
-    return {
-        "clients": {k: {**v, "client_secret": "***"} for k, v in oauth_clients.items()},
-        "codes": list(oauth_codes.keys()),
-        "tokens": list(access_tokens.keys())
-    }
+# Test Twitter connection
+@app.get("/test-twitter")
+async def test_twitter(request: Request):
+    if not validate_api_key(request):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    try:
+        client = get_twitter_client()
+        me = client.get_me()
+        return {"status": "connected", "user": me.data.username if me.data else "unknown"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
