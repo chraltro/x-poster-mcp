@@ -187,23 +187,24 @@ async def mcp_endpoint(request: Request):
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             body = await request.json()
+            
+            # Handle the request
             response = await mcp_server.handle_request(body)
+            
+            # Send as proper SSE format
             yield f"data: {json.dumps(response)}\n\n"
-            # Important: Signal end of stream
-            yield "data: [DONE]\n\n"
             
         except Exception as e:
             error_response = {
                 "jsonrpc": "2.0",
-                "id": None,
+                "id": body.get("id") if 'body' in locals() else None,
                 "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
             }
             yield f"data: {json.dumps(error_response)}\n\n"
-            yield "data: [DONE]\n\n"
     
     return StreamingResponse(
         event_stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",  # Changed from text/plain
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
