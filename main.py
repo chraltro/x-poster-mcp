@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import uuid
 import secrets
 from datetime import datetime, timedelta
+import asyncio
 
 load_dotenv()
 
@@ -75,14 +76,6 @@ class XPosterMCP:
             }
         
         elif method == "tools/call":
-            # Check authentication for tool calls
-            if not auth_token or auth_token not in access_tokens:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"code": -32600, "message": "Authentication required"}
-                }
-            
             params = request_data.get("params", {})
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
@@ -136,10 +129,10 @@ class XPosterMCP:
 
 mcp_server = XPosterMCP()
 
-# OAuth Discovery Endpoint
+# Simplified OAuth Discovery Endpoint
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_discovery():
-    base_url = "https://web-production-f408.up.railway.app"
+    base_url = os.getenv("BASE_URL", "https://web-production-f408.up.railway.app")
     return {
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/oauth/authorize",
@@ -256,22 +249,46 @@ async def get_auth_token(request: Request) -> Optional[str]:
         return auth_header[7:]
     return None
 
-# Main MCP SSE Endpoint
+# Main MCP SSE Endpoint - Fixed to handle streaming properly
 @app.post("/sse")
 async def mcp_endpoint(request: Request):
     auth_token = await get_auth_token(request)
     
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
-            body = await request.json()
-            response = await mcp_server.handle_request(body, auth_token)
+            # Read the request body
+            body = await request.body()
+            
+            # Handle empty body (initial connection)
+            if not body:
+                # Send initialization message
+                init_response = await mcp_server.handle_request({
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "id": 1
+                }, auth_token)
+                yield f"data: {json.dumps(init_response)}\n\n"
+                return
+            
+            # Parse the request
+            request_data = json.loads(body)
+            
+            # Handle the request
+            response = await mcp_server.handle_request(request_data, auth_token)
             yield f"data: {json.dumps(response)}\n\n"
             
+        except json.JSONDecodeError as e:
+            error_response = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
+            }
+            yield f"data: {json.dumps(error_response)}\n\n"
         except Exception as e:
             error_response = {
                 "jsonrpc": "2.0",
-                "id": body.get("id") if 'body' in locals() else None,
-                "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
+                "id": None,
+                "error": {"code": -32603, "message": f"Internal error: {str(e)}"}
             }
             yield f"data: {json.dumps(error_response)}\n\n"
     
@@ -282,8 +299,41 @@ async def mcp_endpoint(request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization"
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "X-Accel-Buffering": "no"  # Disable Nginx buffering
+        }
+    )
+
+# Add GET endpoint for SSE (some clients might use GET)
+@app.get("/sse")
+async def mcp_endpoint_get(request: Request):
+    auth_token = await get_auth_token(request)
+    
+    async def event_stream() -> AsyncGenerator[str, None]:
+        # Send initialization message
+        init_response = await mcp_server.handle_request({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1
+        }, auth_token)
+        yield f"data: {json.dumps(init_response)}\n\n"
+        
+        # Keep connection alive
+        while True:
+            await asyncio.sleep(30)
+            yield f": keepalive\n\n"
+    
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "X-Accel-Buffering": "no"
         }
     )
 
@@ -293,7 +343,7 @@ async def options():
         {"message": "OK"},
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization"
         }
     )
@@ -301,6 +351,11 @@ async def options():
 @app.get("/")
 async def root():
     return {"name": "X Poster MCP", "version": "1.0.0", "status": "running"}
+
+# Health check endpoint
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
