@@ -55,8 +55,8 @@ async def send_tweet_tool(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
-@app.api_route("/messages", methods=["GET", "POST", "HEAD"])
-async def handle_messages(request: Request):
+@app.api_route("/sse", methods=["GET", "POST", "HEAD"])
+async def handle_sse(request: Request):
     """Handle MCP messages via StreamableHttp - support both GET and POST"""
     try:
         if request.method == "POST":
@@ -77,30 +77,12 @@ async def handle_messages(request: Request):
                 "result": {
                     "protocolVersion": "2025-06-18",
                     "capabilities": {
-                        "tools": {
-                            "listChanged": False
-                        }
+                        "tools": {}
                     },
                     "serverInfo": {
                         "name": "x-poster",
                         "version": "1.0.0"
-                    },
-                    "tools": [
-                        {
-                            "name": "send_tweet",
-                            "description": "Send a tweet to X/Twitter",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "text": {
-                                        "type": "string",
-                                        "description": "The tweet text to post (max 280 characters)"
-                                    }
-                                },
-                                "required": ["text"]
-                            }
-                        }
-                    ]
+                    }
                 }
             }
             print(f"Initialize response: {response}")
