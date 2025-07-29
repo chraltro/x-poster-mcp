@@ -45,7 +45,7 @@ async def send_tweet_tool(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
-@app.api_route("/messages", methods=["GET", "POST"])
+@app.api_route("/messages", methods=["GET", "POST", "HEAD"])
 async def handle_messages(request: Request):
     """Handle MCP messages via StreamableHttp - support both GET and POST"""
     try:
@@ -60,13 +60,16 @@ async def handle_messages(request: Request):
         params = body.get("params", {})
         
         if method == "initialize":
-            return {
+            print(f"Initialize request: {body}")
+            response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
-                        "tools": {}
+                        "tools": {
+                            "listChanged": False
+                        }
                     },
                     "serverInfo": {
                         "name": "x-poster",
@@ -74,12 +77,15 @@ async def handle_messages(request: Request):
                     }
                 }
             }
+            print(f"Initialize response: {response}")
+            return response
         
         elif method == "notifications/initialized":
             return JSONResponse(content=None, status_code=200)
         
         elif method == "tools/list":
-            return {
+            print(f"Tools/list request: {body}")
+            response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
@@ -101,6 +107,8 @@ async def handle_messages(request: Request):
                     ]
                 }
             }
+            print(f"Tools/list response: {response}")
+            return response
         
         elif method == "tools/call":
             tool_name = params.get("name")
@@ -149,6 +157,27 @@ async def handle_messages(request: Request):
                 "message": f"Internal error: {str(e)}"
             }
         }
+
+# OAuth endpoints that Claude is looking for
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_discovery():
+    return {
+        "issuer": "https://web-production-f408.up.railway.app",
+        "authorization_endpoint": "https://web-production-f408.up.railway.app/oauth/authorize",
+        "token_endpoint": "https://web-production-f408.up.railway.app/oauth/token"
+    }
+
+@app.get("/oauth/authorize")
+async def authorize():
+    return {"access_token": "dummy_token", "token_type": "Bearer"}
+
+@app.post("/oauth/token")
+async def token():
+    return {"access_token": "dummy_token", "token_type": "Bearer", "expires_in": 3600}
+
+@app.post("/register")
+async def register():
+    return {"client_id": "dummy_client", "client_secret": "dummy_secret"}
 
 @app.get("/")
 async def root():
