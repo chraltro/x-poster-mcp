@@ -53,8 +53,9 @@ async def handle_mcp_request(request_data: dict) -> dict:
     """Handle MCP protocol requests"""
     method = request_data.get("method")
     request_id = request_data.get("id")
+    params = request_data.get("params", {})
     
-    logger.info(f"Handling MCP request: {method}")
+    logger.info(f"Handling MCP request: {method} with params: {params}")
     
     if method == "initialize":
         return {
@@ -70,7 +71,23 @@ async def handle_mcp_request(request_data: dict) -> dict:
                 "serverInfo": {
                     "name": "x-poster",
                     "version": "1.0.0"
-                }
+                },
+                "tools": [
+                    {
+                        "name": "send_tweet",
+                        "description": "Send a tweet to X/Twitter",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "description": "The tweet text to post (max 280 characters)"
+                                }
+                            },
+                            "required": ["text"]
+                        }
+                    }
+                ]
             }
         }
     
