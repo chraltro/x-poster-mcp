@@ -64,7 +64,9 @@ async def handle_mcp_request(request_data: dict) -> dict:
             "result": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {
-                    "tools": {}
+                    "tools": {
+                        "listChanged": False
+                    }
                 },
                 "serverInfo": {
                     "name": "x-poster",
