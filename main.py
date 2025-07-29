@@ -1,43 +1,13 @@
-import asyncio
-import json
-import logging
 import os
-import secrets
-from datetime import datetime, timedelta
-from typing import Any, Dict, AsyncGenerator, Optional
-
 import tweepy
-from fastapi import FastAPI, Request, HTTPException, Form
-from fastapi.responses import StreamingResponse, RedirectResponse
 from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup
 load_dotenv()
 
-# Initialize FastAPI app
-app = FastAPI(title="X Poster MCP Server", version="1.0.0")
-
-# OAuth storage (in production, use a proper database)
-oauth_clients = {}
-oauth_codes = {}
-access_tokens = {}
-
-# Pre-register Claude's client to handle the case where it uses its own client_id
-def ensure_client_registered(client_id: str, redirect_uri: str = "https://claude.ai/api/mcp/auth_callback"):
-    """Ensure a client is registered, register it if not"""
-    if client_id not in oauth_clients:
-        # Generate a default secret for unknown clients
-        client_secret = secrets.token_urlsafe(32)
-        oauth_clients[client_id] = {
-            "client_secret": client_secret,
-            "client_name": "Auto-registered Claude Client",
-            "redirect_uris": [redirect_uri],
-            "created_at": datetime.utcnow()
-        }
-        logger.info(f"Auto-registered client: {client_id}")
-    return oauth_clients[client_id]
+# Initialize FastMCP server
+mcp = FastMCP("x-poster")
 
 def get_twitter_client():
     """Initialize Twitter client with credentials from environment variables"""
@@ -49,356 +19,37 @@ def get_twitter_client():
         access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
     )
 
-async def handle_mcp_request(request_data: dict) -> dict:
-    """Handle MCP protocol requests"""
-    method = request_data.get("method")
-    request_id = request_data.get("id")
-    params = request_data.get("params", {})
-    
-    logger.info(f"Handling MCP request: {method} with params: {params}")
-    
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {
-                    "tools": {
-                        "listChanged": False
-                    }
-                },
-                "serverInfo": {
-                    "name": "x-poster",
-                    "version": "1.0.0"
-                }
-            }
-        }
-    
-    elif method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "send_tweet",
-                        "description": "Send a tweet to X/Twitter",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "text": {
-                                    "type": "string",
-                                    "description": "The tweet text to post (max 280 characters)"
-                                }
-                            },
-                            "required": ["text"]
-                        }
-                    }
-                ]
-            }
-        }
-    
-    elif method == "tools/call":
-        params = request_data.get("params", {})
-        tool_name = params.get("name")
-        arguments = params.get("arguments", {})
-        
-        if tool_name == "send_tweet":
-            try:
-                tweet_text = arguments.get("text", "").strip()
-                
-                if not tweet_text:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "❌ Error: Tweet text cannot be empty"
-                                }
-                            ]
-                        }
-                    }
-                
-                if len(tweet_text) > 280:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "❌ Error: Tweet text exceeds 280 character limit"
-                                }
-                            ]
-                        }
-                    }
-                
-                # Post the tweet
-                client = get_twitter_client()
-                response = client.create_tweet(text=tweet_text)
-                
-                if response.data:
-                    tweet_id = response.data['id']
-                    tweet_url = f"https://twitter.com/user/status/{tweet_id}"
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": f"✅ Tweet posted successfully!\nTweet ID: {tweet_id}\nURL: {tweet_url}"
-                                }
-                            ]
-                        }
-                    }
-                else:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "❌ Error: Failed to post tweet - no response data"
-                                }
-                            ]
-                        }
-                    }
-                    
-            except Exception as e:
-                logger.error(f"Failed to post tweet: {e}")
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"❌ Error posting tweet: {str(e)}"
-                            }
-                        ]
-                    }
-                }
-        else:
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {
-                    "code": -32601,
-                    "message": f"Unknown tool: {tool_name}"
-                }
-            }
-    
-    else:
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {
-                "code": -32601,
-                "message": f"Method not found: {method}"
-            }
-        }
+@mcp.tool()
+async def send_tweet(text: str) -> str:
+    """Send a tweet to X/Twitter.
 
-# OAuth 2.0 Endpoints
-@app.get("/.well-known/oauth-authorization-server")
-async def oauth_discovery():
-    """OAuth 2.0 Authorization Server Metadata"""
-    base_url = os.getenv("BASE_URL", "https://web-production-f408.up.railway.app")
-    return {
-        "issuer": base_url,
-        "authorization_endpoint": f"{base_url}/oauth/authorize",
-        "token_endpoint": f"{base_url}/oauth/token",
-        "registration_endpoint": f"{base_url}/oauth/register"
-    }
-
-@app.post("/oauth/register")
-async def register_client(request: Request):
-    """OAuth 2.0 Dynamic Client Registration"""
+    Args:
+        text: The tweet text to post (max 280 characters)
+    """
     try:
-        body = await request.json()
-        client_name = body.get("client_name", "Claude MCP Client")
-        redirect_uris = body.get("redirect_uris", ["https://claude.ai/api/mcp/auth_callback"])
+        tweet_text = text.strip()
         
-        client_id = secrets.token_urlsafe(32)
-        client_secret = secrets.token_urlsafe(32)
+        if not tweet_text:
+            return "❌ Error: Tweet text cannot be empty"
         
-        oauth_clients[client_id] = {
-            "client_secret": client_secret,
-            "client_name": client_name,
-            "redirect_uris": redirect_uris,
-            "created_at": datetime.utcnow()
-        }
+        if len(tweet_text) > 280:
+            return "❌ Error: Tweet text exceeds 280 character limit"
         
-        logger.info(f"Registered OAuth client: {client_id}")
+        # Post the tweet
+        client = get_twitter_client()
+        response = client.create_tweet(text=tweet_text)
         
-        return {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "client_id_issued_at": int(datetime.utcnow().timestamp()),
-            "client_secret_expires_at": 0
-        }
+        if response.data:
+            tweet_id = response.data['id']
+            tweet_url = f"https://twitter.com/user/status/{tweet_id}"
+            return f"✅ Tweet posted successfully!\nTweet ID: {tweet_id}\nURL: {tweet_url}"
+        else:
+            return "❌ Error: Failed to post tweet - no response data"
+            
     except Exception as e:
-        logger.error(f"Client registration error: {e}")
-        raise HTTPException(status_code=400, detail="Invalid request")
-
-@app.get("/oauth/authorize")
-async def authorize(
-    client_id: str, 
-    redirect_uri: str, 
-    response_type: str = "code",
-    state: Optional[str] = None,
-    scope: Optional[str] = None,
-    code_challenge: Optional[str] = None,
-    code_challenge_method: Optional[str] = None
-):
-    """OAuth 2.0 Authorization Endpoint"""
-    logger.info(f"Authorization request: client_id={client_id}, redirect_uri={redirect_uri}")
-    
-    # Auto-register client if it doesn't exist
-    client = ensure_client_registered(client_id, redirect_uri)
-    
-    # Validate redirect URI
-    if redirect_uri not in client["redirect_uris"] and redirect_uri == "https://claude.ai/api/mcp/auth_callback":
-        # Add Claude's redirect URI if it's not already there
-        client["redirect_uris"].append(redirect_uri)
-    elif redirect_uri not in client["redirect_uris"]:
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-    
-    # Generate authorization code
-    auth_code = secrets.token_urlsafe(32)
-    oauth_codes[auth_code] = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "expires_at": datetime.utcnow() + timedelta(minutes=10),
-        "code_challenge": code_challenge,
-        "code_challenge_method": code_challenge_method
-    }
-    
-    # Redirect back to Claude with authorization code
-    callback_url = f"{redirect_uri}?code={auth_code}"
-    if state:
-        callback_url += f"&state={state}"
-    
-    logger.info(f"Redirecting to: {callback_url}")
-    return RedirectResponse(callback_url)
-
-@app.post("/oauth/token")
-async def token_endpoint(
-    grant_type: str = Form(),
-    code: str = Form(),
-    client_id: str = Form(),
-    client_secret: str = Form(None),
-    redirect_uri: str = Form(None),
-    code_verifier: str = Form(None)
-):
-    """OAuth 2.0 Token Endpoint"""
-    logger.info(f"Token request: client_id={client_id}, grant_type={grant_type}")
-    
-    # Validate authorization code first
-    if code not in oauth_codes:
-        raise HTTPException(status_code=400, detail="Invalid authorization code")
-    
-    code_data = oauth_codes.pop(code)
-    if code_data["client_id"] != client_id:
-        raise HTTPException(status_code=400, detail="Authorization code mismatch")
-    
-    if code_data["expires_at"] < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Authorization code expired")
-    
-    # Ensure client is registered (in case it was auto-registered during auth)
-    client = ensure_client_registered(client_id)
-    
-    # For PKCE flow (which Claude might use), skip client_secret validation if code_verifier is present
-    if code_verifier:
-        # TODO: Implement PKCE verification if needed
-        logger.info(f"PKCE flow detected for client: {client_id}")
-    elif client_secret and client["client_secret"] != client_secret:
-        # Only validate client_secret if it's provided and no PKCE
-        raise HTTPException(status_code=401, detail="Invalid client credentials")
-    
-    # Generate access token with much longer expiration
-    access_token = secrets.token_urlsafe(32)
-    access_tokens[access_token] = {
-        "client_id": client_id,
-        "expires_at": datetime.utcnow() + timedelta(days=365)  # 1 year expiration
-    }
-    
-    logger.info(f"All access tokens: {list(access_tokens.keys())}")
-    
-    logger.info(f"Issued access token for client: {client_id}")
-    
-    return {
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": 86400
-    }
-
-async def validate_auth_token(request: Request) -> bool:
-    """Validate Bearer token from Authorization header - accept any Bearer token for simplicity"""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.error("No valid Authorization header")
-        return False
-    
-    token = auth_header[7:]  # Remove "Bearer " prefix
-    
-    # For simplicity with server restarts, accept any Bearer token that looks valid
-    if len(token) > 20:  # Reasonable token length check
-        logger.info(f"Accepting token: {token[:20]}...")
-        return True
-    
-    logger.error("Token too short or invalid format")
-    return False
-
-@app.api_route("/sse", methods=["GET", "POST"])
-async def handle_sse(request: Request):
-    """Handle SSE requests from Claude"""
-    # For GET requests (MCP inspector), skip OAuth validation
-    # For POST requests (Claude), validate OAuth
-    if request.method == "POST":
-        if not await validate_auth_token(request):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    # Read body once
-    body = await request.body()
-    
-    # Process MCP request
-    if body:
-        request_data = json.loads(body.decode('utf-8'))
-        response = await handle_mcp_request(request_data)
-    else:
-        response = await handle_mcp_request({
-            "jsonrpc": "2.0",
-            "method": "initialize", 
-            "id": 1
-        })
-    
-    # Return simple SSE response
-    async def event_stream():
-        yield f"data: {json.dumps(response)}\n\n"
-    
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Methods": "*"
-        }
-    )
-
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "X Poster MCP Server"}
+        return f"❌ Error posting tweet: {str(e)}"
 
 if __name__ == "__main__":
-    import uvicorn
+    # For Railway deployment, we need to use the PORT environment variable
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    mcp.run(host="0.0.0.0", port=port)
