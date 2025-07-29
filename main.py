@@ -62,32 +62,14 @@ async def handle_mcp_request(request_data: dict) -> dict:
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-06-18",
                 "capabilities": {
-                    "tools": {
-                        "listChanged": True
-                    }
+                    "tools": {}
                 },
                 "serverInfo": {
                     "name": "x-poster",
                     "version": "1.0.0"
-                },
-                "tools": [
-                    {
-                        "name": "send_tweet",
-                        "description": "Send a tweet to X/Twitter",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "text": {
-                                    "type": "string",
-                                    "description": "The tweet text to post (max 280 characters)"
-                                }
-                            },
-                            "required": ["text"]
-                        }
-                    }
-                ]
+                }
             }
         }
     
