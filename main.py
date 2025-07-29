@@ -354,12 +354,14 @@ async def validate_auth_token(request: Request) -> bool:
     logger.error("Token too short or invalid format")
     return False
 
-@app.post("/sse")
+@app.api_route("/sse", methods=["GET", "POST"])
 async def handle_sse(request: Request):
     """Handle SSE requests from Claude"""
-    # Validate OAuth token
-    if not await validate_auth_token(request):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    # For GET requests (MCP inspector), skip OAuth validation
+    # For POST requests (Claude), validate OAuth
+    if request.method == "POST":
+        if not await validate_auth_token(request):
+            raise HTTPException(status_code=401, detail="Unauthorized")
     
     # Read body once
     body = await request.body()
