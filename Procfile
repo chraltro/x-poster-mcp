@@ -1,1 +1,1 @@
-web: python main.py
+web: python -m mcp.server.fastmcp main:mcp --port $PORT
