@@ -147,6 +147,31 @@ async def handle_messages(request: Request):
             }
         }
 
+# OAuth endpoints for Claude custom connectors
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_discovery():
+    base_url = os.getenv("BASE_URL", "https://web-production-f408.up.railway.app")
+    return {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/oauth/authorize",
+        "token_endpoint": f"{base_url}/oauth/token"
+    }
+
+@app.get("/oauth/authorize")
+async def authorize():
+    # Auto-approve any authorization request
+    return {"access_token": "dummy_token", "token_type": "Bearer"}
+
+@app.post("/oauth/token")
+async def token():
+    # Return a dummy token
+    return {"access_token": "dummy_token", "token_type": "Bearer", "expires_in": 3600}
+
+@app.post("/register")
+async def register():
+    # Return dummy client registration
+    return {"client_id": "dummy_client", "client_secret": "dummy_secret"}
+
 @app.get("/")
 async def root():
     return {"status": "healthy", "service": "X Poster MCP Server"}
