@@ -1,13 +1,14 @@
+import json
 import os
 import tweepy
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
 
 # Setup
 load_dotenv()
 
-# Initialize FastMCP server
-mcp = FastMCP("x-poster")
+app = FastAPI(title="X Poster MCP Server")
 
 def get_twitter_client():
     """Initialize Twitter client with credentials from environment variables"""
@@ -19,13 +20,8 @@ def get_twitter_client():
         access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
     )
 
-@mcp.tool()
-async def send_tweet(text: str) -> str:
-    """Send a tweet to X/Twitter.
-
-    Args:
-        text: The tweet text to post (max 280 characters)
-    """
+async def send_tweet_tool(text: str) -> str:
+    """Send a tweet to X/Twitter."""
     try:
         tweet_text = text.strip()
         
@@ -49,10 +45,108 @@ async def send_tweet(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
-# Create ASGI app for Railway
-app = mcp.create_app()
+@app.post("/messages")
+async def handle_messages(request: Request):
+    """Handle MCP messages via StreamableHttp"""
+    try:
+        body = await request.json()
+        
+        method = body.get("method")
+        request_id = body.get("id")
+        params = body.get("params", {})
+        
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": "x-poster",
+                        "version": "1.0.0"
+                    }
+                }
+            }
+        
+        elif method == "notifications/initialized":
+            # Just acknowledge
+            return JSONResponse(content=None, status_code=200)
+        
+        elif method == "tools/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "tools": [
+                        {
+                            "name": "send_tweet",
+                            "description": "Send a tweet to X/Twitter",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "description": "The tweet text to post (max 280 characters)"
+                                    }
+                                },
+                                "required": ["text"]
+                            }
+                        }
+                    ]
+                }
+            }
+        
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            arguments = params.get("arguments", {})
+            
+            if tool_name == "send_tweet":
+                result = await send_tweet_tool(arguments.get("text", ""))
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": result
+                            }
+                        ]
+                    }
+                }
+            else:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"Unknown tool: {tool_name}"
+                    }
+                }
+        
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"Method not found: {method}"
+                }
+            }
+            
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32603,
+                "message": f"Internal error: {str(e)}"
+            }
+        }
 
-if __name__ == "__main__":
-    # For Railway deployment, we need to use the PORT environment variable
-    port = int(os.environ.get("PORT", 8000))
-    mcp.run(host="0.0.0.0", port=port)
+@app.get("/")
+async def root():
+    return {"status": "healthy", "service": "X Poster MCP Server"}
