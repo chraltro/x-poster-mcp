@@ -49,6 +49,9 @@ async def send_tweet(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
+# Create ASGI app for Railway
+app = mcp.create_app()
+
 if __name__ == "__main__":
     # For Railway deployment, we need to use the PORT environment variable
     port = int(os.environ.get("PORT", 8000))

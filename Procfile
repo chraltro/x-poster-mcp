@@ -1,1 +1,1 @@
-web: python -m mcp.server.fastmcp main:mcp --port $PORT
+web: uvicorn main:app --host 0.0.0.0 --port $PORT
