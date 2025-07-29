@@ -392,7 +392,9 @@ async def handle_sse(request: Request):
                     body_str = body.decode('utf-8')
                     logger.info(f"SSE request body: {body_str}")
                     request_data = json.loads(body_str)
+                    logger.info(f"Parsed request data: {request_data}")
                     response = await handle_mcp_request(request_data)
+                    logger.info(f"Generated response: {json.dumps(response)}")
                     yield f"data: {json.dumps(response)}\n\n"
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse JSON body: {e}")
@@ -412,6 +414,9 @@ async def handle_sse(request: Request):
                 })
                 logger.info(f"Sending init response: {json.dumps(init_response)}")
                 yield f"data: {json.dumps(init_response)}\n\n"
+            
+            # Keep the stream alive for a bit to see if Claude sends more requests
+            logger.info("Event stream completed, keeping connection open briefly")
                 
         except Exception as e:
             logger.error(f"SSE error: {e}", exc_info=True)
