@@ -1,14 +1,13 @@
-import json
 import os
 import tweepy
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
 
 # Setup
 load_dotenv()
 
-app = FastAPI(title="X Poster MCP Server")
+# Initialize FastMCP server
+mcp = FastMCP("x-poster")
 
 def get_twitter_client():
     """Initialize Twitter client with credentials from environment variables"""
@@ -20,8 +19,13 @@ def get_twitter_client():
         access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
     )
 
-async def send_tweet_tool(text: str) -> str:
-    """Send a tweet to X/Twitter."""
+@mcp.tool()
+async def send_tweet(text: str) -> str:
+    """Send a tweet to X/Twitter.
+
+    Args:
+        text: The tweet text to post (max 280 characters)
+    """
     try:
         tweet_text = text.strip()
         
@@ -45,133 +49,7 @@ async def send_tweet_tool(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
-@app.post("/messages")
-async def handle_messages(request: Request):
-    """Handle MCP messages via StreamableHttp"""
-    try:
-        body = await request.json()
-        
-        method = body.get("method")
-        request_id = body.get("id")
-        params = body.get("params", {})
-        
-        if method == "initialize":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {}
-                    },
-                    "serverInfo": {
-                        "name": "x-poster",
-                        "version": "1.0.0"
-                    }
-                }
-            }
-        
-        elif method == "notifications/initialized":
-            # Just acknowledge
-            return JSONResponse(content=None, status_code=200)
-        
-        elif method == "tools/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "tools": [
-                        {
-                            "name": "send_tweet",
-                            "description": "Send a tweet to X/Twitter",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "text": {
-                                        "type": "string",
-                                        "description": "The tweet text to post (max 280 characters)"
-                                    }
-                                },
-                                "required": ["text"]
-                            }
-                        }
-                    ]
-                }
-            }
-        
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            arguments = params.get("arguments", {})
-            
-            if tool_name == "send_tweet":
-                result = await send_tweet_tool(arguments.get("text", ""))
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": result
-                            }
-                        ]
-                    }
-                }
-            else:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {
-                        "code": -32601,
-                        "message": f"Unknown tool: {tool_name}"
-                    }
-                }
-        
-        else:
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {
-                    "code": -32601,
-                    "message": f"Method not found: {method}"
-                }
-            }
-            
-    except Exception as e:
-        return {
-            "jsonrpc": "2.0",
-            "id": None,
-            "error": {
-                "code": -32603,
-                "message": f"Internal error: {str(e)}"
-            }
-        }
-
-# OAuth endpoints for Claude custom connectors
-@app.get("/.well-known/oauth-authorization-server")
-async def oauth_discovery():
-    base_url = os.getenv("BASE_URL", "https://web-production-f408.up.railway.app")
-    return {
-        "issuer": base_url,
-        "authorization_endpoint": f"{base_url}/oauth/authorize",
-        "token_endpoint": f"{base_url}/oauth/token"
-    }
-
-@app.get("/oauth/authorize")
-async def authorize():
-    # Auto-approve any authorization request
-    return {"access_token": "dummy_token", "token_type": "Bearer"}
-
-@app.post("/oauth/token")
-async def token():
-    # Return a dummy token
-    return {"access_token": "dummy_token", "token_type": "Bearer", "expires_in": 3600}
-
-@app.post("/register")
-async def register():
-    # Return dummy client registration
-    return {"client_id": "dummy_client", "client_secret": "dummy_secret"}
-
-@app.get("/")
-async def root():
-    return {"status": "healthy", "service": "X Poster MCP Server"}
+if __name__ == "__main__":
+    # For web deployment, use streamable http transport
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="streamable_http", host="0.0.0.0", port=port)
