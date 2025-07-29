@@ -355,59 +355,27 @@ async def validate_auth_token(request: Request) -> bool:
 @app.post("/sse")
 async def handle_sse(request: Request):
     """Handle SSE requests from Claude"""
-    logger.info(f"SSE request received. Headers: {dict(request.headers)}")
-    
     # Validate OAuth token
     if not await validate_auth_token(request):
-        logger.error("SSE request failed OAuth validation")
         raise HTTPException(status_code=401, detail="Unauthorized")
     
-    logger.info("SSE request passed OAuth validation")
+    # Read body once
+    body = await request.body()
     
-    async def event_stream() -> AsyncGenerator[str, None]:
-        try:
-            body = await request.body()
-            logger.info(f"SSE request body length: {len(body) if body else 0}")
-            
-            if body:
-                try:
-                    body_str = body.decode('utf-8')
-                    logger.info(f"SSE request body: {body_str}")
-                    request_data = json.loads(body_str)
-                    logger.info(f"Parsed request data: {request_data}")
-                    response = await handle_mcp_request(request_data)
-                    logger.info(f"Generated response: {json.dumps(response)}")
-                    yield f"data: {json.dumps(response)}\n\n"
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON body: {e}")
-                    error_response = {
-                        "jsonrpc": "2.0",
-                        "id": None,
-                        "error": {"code": -32700, "message": "Parse error"}
-                    }
-                    yield f"data: {json.dumps(error_response)}\n\n"
-            else:
-                # Handle empty body with initialization
-                logger.info("Empty body received, sending initialize response")
-                init_response = await handle_mcp_request({
-                    "jsonrpc": "2.0",
-                    "method": "initialize",
-                    "id": 1
-                })
-                logger.info(f"Sending init response: {json.dumps(init_response)}")
-                yield f"data: {json.dumps(init_response)}\n\n"
-            
-            # Keep the stream alive for a bit to see if Claude sends more requests
-            logger.info("Event stream completed, keeping connection open briefly")
-                
-        except Exception as e:
-            logger.error(f"SSE error: {e}", exc_info=True)
-            error_response = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32603, "message": str(e)}
-            }
-            yield f"data: {json.dumps(error_response)}\n\n"
+    # Process MCP request
+    if body:
+        request_data = json.loads(body.decode('utf-8'))
+        response = await handle_mcp_request(request_data)
+    else:
+        response = await handle_mcp_request({
+            "jsonrpc": "2.0",
+            "method": "initialize", 
+            "id": 1
+        })
+    
+    # Return simple SSE response
+    async def event_stream():
+        yield f"data: {json.dumps(response)}\n\n"
     
     return StreamingResponse(
         event_stream(),
