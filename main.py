@@ -55,8 +55,17 @@ async def send_tweet_tool(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
-@app.api_route("/sse", methods=["GET", "POST", "HEAD"])
+@app.api_route("/messages", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def handle_messages(request: Request):
+    """Handle MCP messages via StreamableHttp - support both GET and POST"""
+    return await handle_mcp_request(request)
+
+@app.api_route("/sse", methods=["GET", "POST", "HEAD", "OPTIONS"])  
 async def handle_sse(request: Request):
+    """Handle MCP messages via SSE - support both GET and POST"""
+    return await handle_mcp_request(request)
+
+async def handle_mcp_request(request: Request):
     """Handle MCP messages via StreamableHttp - support both GET and POST"""
     try:
         if request.method == "POST":
@@ -89,7 +98,15 @@ async def handle_sse(request: Request):
             return response
         
         elif method == "notifications/initialized":
-            return JSONResponse(content=None, status_code=200)
+            print(f"Notifications/initialized request: {body}")
+            # Send tools list proactively as a notification
+            tools_notification = {
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed",
+                "params": {}
+            }
+            print(f"Sending tools notification: {tools_notification}")
+            return JSONResponse(content=tools_notification, status_code=200)
         
         elif method == "tools/list":
             print(f"Tools/list request: {body}")
