@@ -3,12 +3,22 @@ import os
 import tweepy
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 # Setup
 load_dotenv()
 
 app = FastAPI(title="X Poster MCP Server")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_twitter_client():
     """Initialize Twitter client with credentials from environment variables"""
