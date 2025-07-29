@@ -318,12 +318,14 @@ async def token_endpoint(
         # Only validate client_secret if it's provided and no PKCE
         raise HTTPException(status_code=401, detail="Invalid client credentials")
     
-    # Generate access token
+    # Generate access token with much longer expiration
     access_token = secrets.token_urlsafe(32)
     access_tokens[access_token] = {
         "client_id": client_id,
-        "expires_at": datetime.utcnow() + timedelta(hours=24)
+        "expires_at": datetime.utcnow() + timedelta(days=365)  # 1 year expiration
     }
+    
+    logger.info(f"All access tokens: {list(access_tokens.keys())}")
     
     logger.info(f"Issued access token for client: {client_id}")
     
@@ -337,19 +339,24 @@ async def validate_auth_token(request: Request) -> bool:
     """Validate Bearer token from Authorization header"""
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
+        logger.error("No valid Authorization header")
         return False
     
     token = auth_header[7:]  # Remove "Bearer " prefix
+    logger.info(f"Validating token: {token[:20]}...")
     
     if token not in access_tokens:
+        logger.error(f"Token not found in access_tokens. Available tokens: {list(access_tokens.keys())}")
         return False
     
     token_data = access_tokens[token]
     if token_data["expires_at"] < datetime.utcnow():
+        logger.error(f"Token expired at {token_data['expires_at']}")
         # Clean up expired token
         del access_tokens[token]
         return False
     
+    logger.info(f"Token validation successful")
     return True
 
 @app.post("/sse")
