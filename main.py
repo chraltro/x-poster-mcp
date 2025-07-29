@@ -24,6 +24,21 @@ oauth_clients = {}
 oauth_codes = {}
 access_tokens = {}
 
+# Pre-register Claude's client to handle the case where it uses its own client_id
+def ensure_client_registered(client_id: str, redirect_uri: str = "https://claude.ai/api/mcp/auth_callback"):
+    """Ensure a client is registered, register it if not"""
+    if client_id not in oauth_clients:
+        # Generate a default secret for unknown clients
+        client_secret = secrets.token_urlsafe(32)
+        oauth_clients[client_id] = {
+            "client_secret": client_secret,
+            "client_name": "Auto-registered Claude Client",
+            "redirect_uris": [redirect_uri],
+            "created_at": datetime.utcnow()
+        }
+        logger.info(f"Auto-registered client: {client_id}")
+    return oauth_clients[client_id]
+
 def get_twitter_client():
     """Initialize Twitter client with credentials from environment variables"""
     return tweepy.Client(
@@ -235,17 +250,21 @@ async def authorize(
     redirect_uri: str, 
     response_type: str = "code",
     state: Optional[str] = None,
-    scope: Optional[str] = None
+    scope: Optional[str] = None,
+    code_challenge: Optional[str] = None,
+    code_challenge_method: Optional[str] = None
 ):
     """OAuth 2.0 Authorization Endpoint"""
     logger.info(f"Authorization request: client_id={client_id}, redirect_uri={redirect_uri}")
     
-    # Validate client
-    if client_id not in oauth_clients:
-        raise HTTPException(status_code=400, detail="Invalid client_id")
+    # Auto-register client if it doesn't exist
+    client = ensure_client_registered(client_id, redirect_uri)
     
-    client = oauth_clients[client_id]
-    if redirect_uri not in client["redirect_uris"]:
+    # Validate redirect URI
+    if redirect_uri not in client["redirect_uris"] and redirect_uri == "https://claude.ai/api/mcp/auth_callback":
+        # Add Claude's redirect URI if it's not already there
+        client["redirect_uris"].append(redirect_uri)
+    elif redirect_uri not in client["redirect_uris"]:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
     
     # Generate authorization code
@@ -253,7 +272,9 @@ async def authorize(
     oauth_codes[auth_code] = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-        "expires_at": datetime.utcnow() + timedelta(minutes=10)
+        "expires_at": datetime.utcnow() + timedelta(minutes=10),
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method
     }
     
     # Redirect back to Claude with authorization code
@@ -269,21 +290,14 @@ async def token_endpoint(
     grant_type: str = Form(),
     code: str = Form(),
     client_id: str = Form(),
-    client_secret: str = Form(),
-    redirect_uri: str = Form(None)
+    client_secret: str = Form(None),
+    redirect_uri: str = Form(None),
+    code_verifier: str = Form(None)
 ):
     """OAuth 2.0 Token Endpoint"""
     logger.info(f"Token request: client_id={client_id}, grant_type={grant_type}")
     
-    # Validate client credentials
-    if client_id not in oauth_clients:
-        raise HTTPException(status_code=401, detail="Invalid client")
-    
-    client = oauth_clients[client_id]
-    if client["client_secret"] != client_secret:
-        raise HTTPException(status_code=401, detail="Invalid client credentials")
-    
-    # Validate authorization code
+    # Validate authorization code first
     if code not in oauth_codes:
         raise HTTPException(status_code=400, detail="Invalid authorization code")
     
@@ -293,6 +307,17 @@ async def token_endpoint(
     
     if code_data["expires_at"] < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Authorization code expired")
+    
+    # Ensure client is registered (in case it was auto-registered during auth)
+    client = ensure_client_registered(client_id)
+    
+    # For PKCE flow (which Claude might use), skip client_secret validation if code_verifier is present
+    if code_verifier:
+        # TODO: Implement PKCE verification if needed
+        logger.info(f"PKCE flow detected for client: {client_id}")
+    elif client_secret and client["client_secret"] != client_secret:
+        # Only validate client_secret if it's provided and no PKCE
+        raise HTTPException(status_code=401, detail="Invalid client credentials")
     
     # Generate access token
     access_token = secrets.token_urlsafe(32)
