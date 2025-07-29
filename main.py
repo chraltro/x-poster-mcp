@@ -30,6 +30,23 @@ def get_twitter_client():
         access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
     )
 
+TOOLS = [
+    {
+        "name": "send_tweet",
+        "description": "Send a tweet to X/Twitter",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The tweet text to post (max 280 characters)"
+                }
+            },
+            "required": ["text"]
+        }
+    }
+]
+
 async def send_tweet_tool(text: str) -> str:
     """Send a tweet to X/Twitter."""
     try:
@@ -55,17 +72,12 @@ async def send_tweet_tool(text: str) -> str:
     except Exception as e:
         return f"❌ Error posting tweet: {str(e)}"
 
+TOOL_HANDLERS = {
+    "send_tweet": send_tweet_tool
+}
+
 @app.api_route("/messages", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def handle_messages(request: Request):
-    """Handle MCP messages via StreamableHttp - support both GET and POST"""
-    return await handle_mcp_request(request)
-
-@app.api_route("/sse", methods=["GET", "POST", "HEAD", "OPTIONS"])  
-async def handle_sse(request: Request):
-    """Handle MCP messages via SSE - support both GET and POST"""
-    return await handle_mcp_request(request)
-
-async def handle_mcp_request(request: Request):
     """Handle MCP messages via StreamableHttp - support both GET and POST"""
     try:
         if request.method == "POST":
@@ -114,22 +126,7 @@ async def handle_mcp_request(request: Request):
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "tools": [
-                        {
-                            "name": "send_tweet",
-                            "description": "Send a tweet to X/Twitter",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "text": {
-                                        "type": "string",
-                                        "description": "The tweet text to post (max 280 characters)"
-                                    }
-                                },
-                                "required": ["text"]
-                            }
-                        }
-                    ]
+                    "tools": TOOLS
                 }
             }
             print(f"Tools/list response: {response}")
@@ -139,8 +136,10 @@ async def handle_mcp_request(request: Request):
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
             
-            if tool_name == "send_tweet":
-                result = await send_tweet_tool(arguments.get("text", ""))
+            if tool_name in TOOL_HANDLERS:
+                handler = TOOL_HANDLERS[tool_name]
+                # Call the handler with the arguments
+                result = await handler(**arguments)
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
