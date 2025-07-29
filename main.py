@@ -65,7 +65,7 @@ async def handle_messages(request: Request):
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": {
                         "tools": {
                             "listChanged": False
@@ -74,7 +74,23 @@ async def handle_messages(request: Request):
                     "serverInfo": {
                         "name": "x-poster",
                         "version": "1.0.0"
-                    }
+                    },
+                    "tools": [
+                        {
+                            "name": "send_tweet",
+                            "description": "Send a tweet to X/Twitter",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "description": "The tweet text to post (max 280 characters)"
+                                    }
+                                },
+                                "required": ["text"]
+                            }
+                        }
+                    ]
                 }
             }
             print(f"Initialize response: {response}")
