@@ -373,28 +373,48 @@ async def validate_auth_token(request: Request) -> bool:
 @app.post("/sse")
 async def handle_sse(request: Request):
     """Handle SSE requests from Claude"""
+    logger.info(f"SSE request received. Headers: {dict(request.headers)}")
+    
     # Validate OAuth token
     if not await validate_auth_token(request):
+        logger.error("SSE request failed OAuth validation")
         raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    logger.info("SSE request passed OAuth validation")
     
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             body = await request.body()
+            logger.info(f"SSE request body length: {len(body) if body else 0}")
+            
             if body:
-                request_data = json.loads(body.decode())
-                response = await handle_mcp_request(request_data)
-                yield f"data: {json.dumps(response)}\n\n"
+                try:
+                    body_str = body.decode('utf-8')
+                    logger.info(f"SSE request body: {body_str}")
+                    request_data = json.loads(body_str)
+                    response = await handle_mcp_request(request_data)
+                    yield f"data: {json.dumps(response)}\n\n"
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON body: {e}")
+                    error_response = {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": "Parse error"}
+                    }
+                    yield f"data: {json.dumps(error_response)}\n\n"
             else:
                 # Handle empty body with initialization
+                logger.info("Empty body received, sending initialize response")
                 init_response = await handle_mcp_request({
                     "jsonrpc": "2.0",
                     "method": "initialize",
                     "id": 1
                 })
+                logger.info(f"Sending init response: {json.dumps(init_response)}")
                 yield f"data: {json.dumps(init_response)}\n\n"
                 
         except Exception as e:
-            logger.error(f"SSE error: {e}")
+            logger.error(f"SSE error: {e}", exc_info=True)
             error_response = {
                 "jsonrpc": "2.0",
                 "id": None,
